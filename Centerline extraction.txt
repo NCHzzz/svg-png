@@ -1,0 +1,22 @@
+Centerline extraction
+You're given 7 PNG icons — 1024×1024, a single solid-black shape on a white/transparent background. Write a program that, for each PNG, outputs an SVG whose paths follow the centerline (the medial axis) of the shape instead of its outline.
+
+An Hdrawn with a thick black stroke should come out as three thin stroked paths — two vertical, one horizontal — joined at the intersections. You're turning a filled shape back into the skeleton a person would draw with a pen.
+
+Sample inputs and reference SVGs: "C:\svg-png\challenge_sample" and "C:\svg-png\challenge_sample_results"
+Output
+For each <name>.png, write <name>.svg with viewBox="0 0 1024 1024" and stroked <path> elements (fill="none") tracing the medial axis. The reference uses stroke-width="45" with rounded caps and joins — any reasonable width that resembles the original is fine.
+
+Ground rules
+AI coding assistants (Claude Code, Cursor, Copilot, etc.) are allowed and encouraged — we care about the result and that you can explain it.
+No third-party libraries. Building it is the point.
+Any language — Python is easiest, but we'll review anything reasonable.
+Include a short README explaining your approach, what you'd improve with more time, and where your output diverges from the reference and why.
+Hint
+Rough direction: convert the PNG to a binary mask → trace the shape's contour → use perpendiculars across the stroke to find midpoints → connect those midpoints into paths. The rest is up to you.
+
+What we evaluate
+Correctness — centerlines land in the right place and stroke intersections preserve the right topology.
+Algorithmic understanding — you can explain whyyour thinning works, not just that it does. We'll ask in the follow-up.
+Judgment with AI tooling — using AI to write the code is fine; using it without reading what it produced is not. Own every line.
+Communication — your README makes it easy to see what you built and where the rough edges are.

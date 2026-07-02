@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Centerline SVG Comparison</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    padding: 20px;
+  }
+  h1 {
+    text-align: center;
+    margin-bottom: 8px;
+    font-size: 1.6rem;
+    color: #e0e0ff;
+  }
+  .subtitle {
+    text-align: center;
+    color: #888;
+    margin-bottom: 24px;
+    font-size: 0.9rem;
+  }
+  .compare-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .compare-row {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #2a2a4a;
+  }
+  .row-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #2a2a4a;
+  }
+  .row-header h2 {
+    font-size: 1.2rem;
+    color: #c0c0ff;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge {
+    font-size: 0.75rem;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+  }
+  .badge-paths {
+    background: #2a2a5a;
+    color: #aac;
+  }
+  .row-panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 1000px) {
+    .row-panels { grid-template-columns: 1fr; }
+  }
+  .panel {
+    background: #0f0f23;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #2a2a4a;
+  }
+  .panel-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #1a1a35;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #aaa;
+    border-bottom: 1px solid #2a2a4a;
+  }
+  .panel-label .tag {
+    font-size: 0.7rem;
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-weight: 500;
+  }
+  .tag-ref { background: #2d4a2d; color: #8f8; }
+  .tag-mine { background: #3a2a4a; color: #c8f; }
+  .tag-png { background: #3a3a2a; color: #ff8; }
+  .panel-content {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    min-height: 280px;
+    background: repeating-conic-gradient(#1a1a2e 0% 25%, #1e1e32 0% 50%) 50% / 20px 20px;
+  }
+  .panel-content img, .panel-content object {
+    max-width: 100%;
+    max-height: 320px;
+    object-fit: contain;
+  }
+  .panel-content object {
+    width: 280px;
+    height: 280px;
+  }
+  .stats {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .stat {
+    font-size: 0.78rem;
+    color: #aaa;
+    background: #1a1a35;
+    padding: 4px 10px;
+    border-radius: 6px;
+  }
+  .stat strong { color: #ddd; }
+  .footer {
+    text-align: center;
+    margin-top: 32px;
+    color: #555;
+    font-size: 0.8rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Centerline SVG Extraction — Comparison</h1>
+<p class="subtitle">Reference (left) &nbsp;|&nbsp; My Output (center) &nbsp;|&nbsp; Original PNG (right)</p>
+
+<div class="compare-grid" id="grid"></div>
+
+<div class="footer">Pure Python — contour → perpendicular chord → midpoint chaining · stroke width auto-estimated per shape</div>
+
+<script>
+const FILES = [
+  'letter_H',
+  'letter_K',
+  'arrow-turn-down-left',
+  'arrow-pointer',
+  'number_3',
+  'number_6',
+  'ampersand',
+];
+
+async function loadSvgStats(path) {
+  try {
+    const resp = await fetch(path);
+    const text = await resp.text();
+    const pathCount = (text.match(/<path /g) || []).length;
+    // Rough size
+    const sizeKB = (new Blob([text]).size / 1024).toFixed(1);
+    return { pathCount, sizeKB };
+  } catch {
+    return { pathCount: '?', sizeKB: '?' };
+  }
+}
+
+function buildPanel(label, tag, tagClass, src, type) {
+  let content;
+  if (type === 'svg') {
+    content = `<object data="${src}" type="image/svg+xml" style="width:280px;height:280px;">
+      <img src="${src}" alt="${label}" style="max-width:280px;max-height:280px;">
+    </object>`;
+  } else {
+    content = `<img src="${src}" alt="${label}" style="max-width:280px;max-height:280px;">`;
+  }
+  return `
+    <div class="panel">
+      <div class="panel-label">${label}<span class="tag ${tagClass}">${tag}</span></div>
+      <div class="panel-content">${content}</div>
+    </div>`;
+}
+
+async function buildPage() {
+  const grid = document.getElementById('grid');
+
+  for (const name of FILES) {
+    const refPath = `challenge_sample_results/${name}.svg`;
+    const myPath = `out/${name}.svg`;
+    const pngPath = `challenge_sample/${name}.png`;
+
+    const [refStats, myStats] = await Promise.all([
+      loadSvgStats(refPath),
+      loadSvgStats(myPath),
+    ]);
+
+    const row = document.createElement('div');
+    row.className = 'compare-row';
+    row.innerHTML = `
+      <div class="row-header">
+        <h2>${name.replace(/_/g, ' ')}</h2>
+        <span class="badge badge-paths">Ref: ${refStats.pathCount} paths · ${refStats.sizeKB}KB</span>
+        <span class="badge badge-paths">Mine: ${myStats.pathCount} paths · ${myStats.sizeKB}KB</span>
+      </div>
+      <div class="row-panels">
+        ${buildPanel('Reference SVG', 'ref', 'tag-ref', refPath, 'svg')}
+        ${buildPanel('My Output SVG', 'mine', 'tag-mine', myPath, 'svg')}
+        ${buildPanel('Original PNG', 'png', 'tag-png', pngPath, 'png')}
+      </div>`;
+
+    grid.appendChild(row);
+  }
+}
+
+buildPage();
+</script>
+
+</body>
+</html>
