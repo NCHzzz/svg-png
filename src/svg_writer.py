@@ -29,6 +29,7 @@ def write_svg(filepath, edges, width=1024, height=1024, stroke_width=45,
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet">',
+        f' <rect width="{width}" height="{height}" fill="#ffffff" />',
         ' <g id="centerline-shapes">',
     ]
 
