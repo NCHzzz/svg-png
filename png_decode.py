@@ -1,14 +1,14 @@
 """
-Pure-Python PNG decoder (stdlib only).
+Pure-Python PNG decoder (stdlib only — no PIL/pillow).
 
-Supports the common non-interlaced 8-bit PNG formats used by icon assets:
+Supports common non-interlaced 8-bit PNG formats:
 - color type 0: grayscale
 - color type 2: RGB
 - color type 4: grayscale + alpha
 - color type 6: RGBA
 
 Returns (width, height, pixels), where pixels is a list of grayscale rows.
-Transparent pixels are treated as white background.
+Transparent pixels are composited over white background.
 """
 
 import struct

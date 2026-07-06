@@ -1,5 +1,6 @@
 """
-Simplified SVG writer. No more connector hacks — topology fixed in graph phase.
+SVG writer — one <path> per centerline polyline with round caps/joins.
+Topology is already resolved upstream; this module only serializes.
 """
 
 import math

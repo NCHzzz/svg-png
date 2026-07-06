@@ -1,7 +1,9 @@
 """
-Core centerline extraction, following the challenge hint:
-binary mask -> contour trace -> perpendicular rays across the stroke
--> midpoints -> chain midpoints by contour order.
+Core centerline extraction via contour-based chord sampling
+(not morphological thinning — the name is a misnomer kept for history).
+
+binary mask → contour trace → perpendicular rays across the stroke
+→ midpoints → chain midpoints by contour order.
 
 The key correctness filter is "centeredness": on the true medial axis the
 clearance of the midpoint (distance transform value) equals half the chord

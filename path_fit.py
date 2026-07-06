@@ -1,6 +1,6 @@
 """
-Path fitting utilities: RDP simplify, straight-line detection, resample, smooth.
-Pure Python, no third-party libs.
+Path fitting utilities: RDP simplify, straight-line detection, resample,
+smooth, axis snap, spike removal. Pure Python, no third-party libs.
 """
 
 import math
@@ -165,12 +165,3 @@ def remove_spikes(poly, min_leg=10.0, angle_thresh=0.45):
         out.append((bx, by))
     out.append(poly[-1])
     return out
-
-
-def polyline_length(poly):
-    """Total arc length."""
-    if len(poly) < 2:
-        return 0.0
-    return sum(math.hypot(poly[i][0] - poly[i - 1][0],
-                          poly[i][1] - poly[i - 1][1])
-               for i in range(1, len(poly)))

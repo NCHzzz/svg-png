@@ -184,7 +184,7 @@ def compute_similarity(grid1, grid2):
 def _mask_grid(name, size=256):
     """Downsample the input PNG's binary mask to the metric grid."""
     from png_decode import decode_png
-    from thinning import binarize
+    from centerline_extract import binarize
     w, h, px = decode_png(f"challenge_sample/{name}.png")
     mask = binarize(px, w, h)
     grid = bytearray(size * size)

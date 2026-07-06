@@ -17,16 +17,52 @@ Post-processing of raw midpoint tracks:
 
 import math
 from collections import defaultdict
+from spatial_hash import PointGrid
 
-_CELL = 8.0
+# ── Pixel-distance thresholds (tuned for ~256–1024 px icons) ────────────
+
+# dedupe
+_DEDUPE_MIN_LEN = 12.0          # min arc length to keep a segment
+_DEDUPE_MAX_RADIUS = 13.0       # max radius for duplicate-point query
+_DEDUPE_MIN_RADIUS = 5.0        # min radius for duplicate-point query
+
+# prune
+_PRUNE_MAX_LEN = 60.0           # paths shorter than this may be pruned
+_PRUNE_COVERAGE_MIN_R = 15.0    # min radius when testing coverage
+
+# junction clustering
+_CLOSED_COINCIDE = 3.0          # max start→end gap to declare a loop
+_END_DIR_SPAN = 18.0            # arc length for tangent direction estimation
+_CLUSTER_GAP_BASE = 28.0        # base max gap for endpoint union-find
+_CORNER_TMAX_BASE = 40.0        # base forward limit for corner ray intersection
+_HUB_TMAX_BASE = 40.0           # base forward limit for hub ray intersection
+
+# cap walk (T-connection / cap extension)
+_CAP_CLEARANCE_DEFAULT = 22.5   # default half-stroke clearance
+_T_TOUCH_RADIUS = 2.5           # if endpoint near another path, skip walk
+_T_HIT_RADIUS = 4.0             # distance to register T-connection hit
+_CAP_EXTEND_MIN = 2.0           # min walk distance to apply cap extension
+
+# topology: crossing detection, connectors, bridges
+_MERGE_POINT_RADIUS = 18.0      # radius for clustering hit points
+_PATH_CROSSING_RADIUS = 22.0    # default radius for hub/endpoint detection
+_CONNECTOR_MAX_GAP = 42.0       # max gap for junction connector segs
+_CONNECTOR_MIN_GAP = 1.5        # min gap for junction connector segs
+_BRIDGE_MIN_GAP = 3.0           # min gap for endpoint bridge
+_BRIDGE_MAX_GAP = 22.0          # max gap for endpoint bridge
+
+# merge collinear
+_MERGE_MAX_GAP = 28.0           # max gap between collinear endpoints
 
 
-def _plen(path):
+def plen(path):
+    """Total arc length of a polyline."""
     return sum(math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
                for i in range(1, len(path)))
 
 
-def _dt_at(dt, x, y, w, h):
+def dt_at(dt, x, y, w, h):
+    """Distance-transform value at (x,y) in pixel units (chamfer ÷ 3)."""
     xi, yi = int(x), int(y)
     if 0 <= xi < w and 0 <= yi < h:
         return dt[yi][xi] / 3.0
@@ -34,54 +70,19 @@ def _dt_at(dt, x, y, w, h):
 
 
 def _inside(mask, x, y, w, h):
+    """True if (x,y) is inside the foreground region."""
     xi, yi = int(x), int(y)
     return 0 <= xi < w and 0 <= yi < h and mask[yi][xi] == 1
 
 
 def _segment_inside_mask(mask, w, h, ax, ay, bx, by):
+    """True if every sampled point on segment a→b is inside foreground."""
     steps = max(1, int(math.hypot(bx - ax, by - ay)))
     for s in range(steps + 1):
         t = s / steps
         if not _inside(mask, ax + t * (bx - ax), ay + t * (by - ay), w, h):
             return False
     return True
-
-
-class _PointGrid:
-    """Spatial hash for nearest-point queries."""
-
-    def __init__(self):
-        self.grid = defaultdict(list)
-
-    def add(self, x, y, tag=None):
-        self.grid[(int(x // _CELL), int(y // _CELL))].append((x, y, tag))
-
-    def near(self, x, y, radius, exclude_tag=None):
-        """Return (dist, x, y, tag) of nearest point within radius, or None."""
-        gx, gy = int(x // _CELL), int(y // _CELL)
-        reach = int(radius // _CELL) + 1
-        best = None
-        for dgy in range(-reach, reach + 1):
-            for dgx in range(-reach, reach + 1):
-                for (ox, oy, tag) in self.grid.get((gx + dgx, gy + dgy), ()):
-                    if exclude_tag is not None and tag == exclude_tag:
-                        continue
-                    d = math.hypot(ox - x, oy - y)
-                    if d <= radius and (best is None or d < best[0]):
-                        best = (d, ox, oy, tag)
-        return best
-
-    def any_match(self, x, y, radius, pred):
-        """True if any point within radius satisfies pred(tag)."""
-        gx, gy = int(x // _CELL), int(y // _CELL)
-        reach = int(radius // _CELL) + 1
-        rr = radius * radius
-        for dgy in range(-reach, reach + 1):
-            for dgx in range(-reach, reach + 1):
-                for (ox, oy, tag) in self.grid.get((gx + dgx, gy + dgy), ()):
-                    if (ox - x) ** 2 + (oy - y) ** 2 <= rr and pred(tag):
-                        return True
-        return False
 
 
 def split_on_clearance_jumps(paths, dt, w, h, up=1.30, down=0.72):
@@ -91,7 +92,7 @@ def split_on_clearance_jumps(paths, dt, w, h, up=1.30, down=0.72):
     outliers so junction resolution can rebuild the topology cleanly."""
     result = []
     for path in paths:
-        clear = [_dt_at(dt, x, y, w, h) for (x, y) in path]
+        clear = [dt_at(dt, x, y, w, h) for (x, y) in path]
         cur = []
         window = []
         for i, pt in enumerate(path):
@@ -112,26 +113,26 @@ def split_on_clearance_jumps(paths, dt, w, h, up=1.30, down=0.72):
     return result
 
 
-def dedupe_paths(paths, dt, w, h, min_len=12.0):
+def dedupe_paths(paths, dt, w, h, min_len=_DEDUPE_MIN_LEN):
     """Every stroke yields two midpoint tracks (one per contour side), and a
     track can additionally fold back on itself where the contour wraps a
     rounded cap. Keep longest tracks first; drop points that duplicate
     already-kept geometry, or the track's own geometry from a distant
     position along the same track (fold-back)."""
-    order = sorted(range(len(paths)), key=lambda i: -_plen(paths[i]))
-    kept = _PointGrid()
+    order = sorted(range(len(paths)), key=lambda i: -plen(paths[i]))
+    kept = PointGrid()
     result = []
 
     for pi in order:
         path = paths[pi]
-        own = _PointGrid()
+        own = PointGrid()
         arc = 0.0
         dup = []
         for k, (x, y) in enumerate(path):
             if k > 0:
                 arc += math.hypot(x - path[k - 1][0], y - path[k - 1][1])
-            clearance = _dt_at(dt, x, y, w, h)
-            r = min(13.0, max(5.0, 0.4 * clearance))
+            clearance = dt_at(dt, x, y, w, h)
+            r = min(_DEDUPE_MAX_RADIUS, max(_DEDUPE_MIN_RADIUS, 0.4 * clearance))
             is_dup = kept.near(x, y, r) is not None
             if not is_dup:
                 # Self fold-back: same location reached much earlier in arc
@@ -157,7 +158,7 @@ def dedupe_paths(paths, dt, w, h, min_len=12.0):
 
         for (a, b) in runs:
             seg = path[a:b]
-            if len(seg) >= 3 and _plen(seg) >= min_len:
+            if len(seg) >= 3 and plen(seg) >= min_len:
                 for (x, y) in seg:
                     kept.add(x, y)
                 result.append(seg)
@@ -166,16 +167,16 @@ def dedupe_paths(paths, dt, w, h, min_len=12.0):
     return result
 
 
-def prune_covered_fragments(paths, dt, w, h, max_len=60.0):
+def prune_covered_fragments(paths, dt, w, h, max_len=_PRUNE_MAX_LEN):
     """Drop short leftover tracks (cap-wrap remnants, junction-blob branch
     stubs) that lie entirely within the stroke area already covered by
     longer paths."""
     if len(paths) < 2:
         return paths
-    lengths = [_plen(p) for p in paths]
+    lengths = [plen(p) for p in paths]
     grids = []
     for p in paths:
-        g = _PointGrid()
+        g = PointGrid()
         for (x, y) in p:
             g.add(x, y)
         grids.append(g)
@@ -186,7 +187,7 @@ def prune_covered_fragments(paths, dt, w, h, max_len=60.0):
             continue
         covered = True
         for (x, y) in path:
-            r = max(1.1 * _dt_at(dt, x, y, w, h), 15.0)
+            r = max(1.1 * dt_at(dt, x, y, w, h), _PRUNE_COVERAGE_MIN_R)
             hit = False
             for pj in range(len(paths)):
                 if pj == pi or not keep[pj] or lengths[pj] <= lengths[pi]:
@@ -207,11 +208,12 @@ def prune_covered_fragments(paths, dt, w, h, max_len=60.0):
 
 
 def _is_closed(path):
+    """True if path's first and last points are nearly coincident (≈loop)."""
     return len(path) >= 4 and math.hypot(path[0][0] - path[-1][0],
-                                         path[0][1] - path[-1][1]) < 3.0
+                                         path[0][1] - path[-1][1]) < _CLOSED_COINCIDE
 
 
-def _end_dir(path, side, span=18.0):
+def _end_dir(path, side, span=_END_DIR_SPAN):
     """Unit direction pointing OUT of the path at the given end, measured
     over `span` pixels of arc length (robust to sub-pixel point noise)."""
     if side == 0:
@@ -236,6 +238,7 @@ def _end_dir(path, side, span=18.0):
 
 
 def _append_end(path, side, pt):
+    """Append pt to start (side=0) or end (side=1) of path in-place."""
     if side == 0:
         path.insert(0, pt)
     else:
@@ -243,7 +246,7 @@ def _append_end(path, side, pt):
 
 
 def _ray_intersection(p1, d1, p2, d2):
-    """Intersection of p1+t1*d1 and p2+t2*d2. Returns (t1, t2, x, y) or None."""
+    """Intersection of ray p1+t*d1 and ray p2+t*d2. Returns (t1, t2, x, y) or None."""
     det = d1[0] * (-d2[1]) - (-d2[0]) * d1[1]
     if abs(det) < 1e-6:
         return None
@@ -253,7 +256,7 @@ def _ray_intersection(p1, d1, p2, d2):
     return (t1, t2, p1[0] + t1 * d1[0], p1[1] + t1 * d1[1])
 
 
-def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
+def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAULT):
     """Reconnect topology at junctions, corners and caps. Mutates copies."""
     paths = [list(p) for p in paths]
 
@@ -281,10 +284,10 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
         for j in range(i + 1, m):
             xi, yi = endpoints[i][2], endpoints[i][3]
             xj, yj = endpoints[j][2], endpoints[j][3]
-            di = _dt_at(dt, xi, yi, w, h)
-            dj = _dt_at(dt, xj, yj, w, h)
+            di = dt_at(dt, xi, yi, w, h)
+            dj = dt_at(dt, xj, yj, w, h)
             gap = math.hypot(xi - xj, yi - yj)
-            if gap < max(28.0, 1.1 * (di + dj)):
+            if gap < max(_CLUSTER_GAP_BASE, 1.1 * (di + dj)):
                 if _segment_inside_mask(mask, w, h, xi, yi, xj, yj):
                     ra, rb = find(i), find(j)
                     if ra != rb:
@@ -324,7 +327,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
         hit = _ray_intersection((xi, yi), d1, (xj, yj), d2)
         if hit is not None:
             t1, t2, cx, cy = hit
-            tmax = 2.5 * gap + 40.0
+            tmax = 2.5 * gap + _CORNER_TMAX_BASE
             if -4.0 <= t1 <= tmax and -4.0 <= t2 <= tmax and \
                     _inside(mask, cx, cy, w, h) and \
                     _segment_inside_mask(mask, w, h, xi, yi, cx, cy) and \
@@ -356,7 +359,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
                 if hit is None:
                     continue
                 t1, t2, ix, iy = hit
-                tmax = 2.0 * gap + 40.0
+                tmax = 2.0 * gap + _HUB_TMAX_BASE
                 if -4.0 <= t1 <= tmax and -4.0 <= t2 <= tmax and \
                         _inside(mask, ix, iy, w, h):
                     pts.append((ix, iy))
@@ -425,7 +428,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
 
     # ---- pass B: T-connections and cap extension --------------------------
     # Registry of all current path points for T-hit tests.
-    registry = _PointGrid()
+    registry = PointGrid()
     for pi, p in enumerate(paths):
         for (x, y) in p:
             registry.add(x, y, pi)
@@ -438,7 +441,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
         dx, dy = _end_dir(paths[pi], si)
         if dx == 0 and dy == 0:
             continue
-        d_end = _dt_at(dt, x, y, w, h)
+        d_end = dt_at(dt, x, y, w, h)
         if d_end < 0.85 * cap_clearance:
             # Tapering terminal (stroke narrows toward the tip): follow it
             # deeper so the drawn cap reaches the tip of the shape.
@@ -450,7 +453,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
         max_walk = min(100.0, 4.0 * max(d_end, 10.0))
 
         # Already touching another path?
-        if registry.near(x, y, 2.5, exclude_tag=pi) is not None:
+        if registry.near(x, y, _T_TOUCH_RADIUS, exclude_tag=pi) is not None:
             continue
 
         cx, cy = x, y
@@ -466,7 +469,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
             for off in (0.0, 0.7, -0.7):
                 px_ = cx + dx + nx * off
                 py_ = cy + dy + ny * off
-                c = _dt_at(dt, px_, py_, w, h)
+                c = dt_at(dt, px_, py_, w, h)
                 if best is None or c > best[0]:
                     best = (c, px_, py_)
             step_c, sx_, sy_ = best
@@ -476,7 +479,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
             walked += m
             if not _inside(mask, cx, cy, w, h):
                 break
-            hit = registry.near(cx, cy, 4.0, exclude_tag=pi)
+            hit = registry.near(cx, cy, _T_HIT_RADIUS, exclude_tag=pi)
             if hit is not None:
                 _append_end(paths[pi], si, (cx, cy))
                 registry.add(cx, cy, pi)
@@ -488,7 +491,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
             else:
                 break
         if not connected and cap_trail and \
-                math.hypot(cap_trail[-1][0] - x, cap_trail[-1][1] - y) >= 2.0:
+                math.hypot(cap_trail[-1][0] - x, cap_trail[-1][1] - y) >= _CAP_EXTEND_MIN:
             for pt in cap_trail:
                 _append_end(paths[pi], si, pt)
                 registry.add(pt[0], pt[1], pi)
@@ -500,12 +503,13 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=22.5):
 
 
 def _segments(poly):
+    """Iterate over consecutive point pairs (edges) of a polyline."""
     for i in range(1, len(poly)):
         yield poly[i - 1], poly[i]
 
 
 def _seg_intersect(a1, a2, b1, b2):
-    """Segment intersection, or None."""
+    """Intersection point of segments a1→a2 and b1→b2, or None if parallel/non-intersecting."""
     x1, y1 = a1
     x2, y2 = a2
     x3, y3 = b1
@@ -520,7 +524,7 @@ def _seg_intersect(a1, a2, b1, b2):
     return None
 
 
-def _merge_points(points, radius=18.0):
+def _merge_points(points, radius=_MERGE_POINT_RADIUS):
     """Cluster nearby points; return centroids."""
     if not points:
         return []
@@ -542,7 +546,7 @@ def _merge_points(points, radius=18.0):
     return hubs
 
 
-def _path_crossing_hubs(paths, merge_radius=22.0):
+def _path_crossing_hubs(paths, merge_radius=_PATH_CROSSING_RADIUS):
     """Junction points from segment crossings and endpoint clusters."""
     hits = []
     for i in range(len(paths)):
@@ -594,7 +598,8 @@ def _path_crossing_hubs(paths, merge_radius=22.0):
     return _merge_points(hits, merge_radius)
 
 
-def _nearest_index(path, hub, radius=22.0):
+def _nearest_index(path, hub, radius=_PATH_CROSSING_RADIUS):
+    """Index of the path point closest to hub within radius, or None."""
     best = None
     for i, (x, y) in enumerate(path):
         d = math.hypot(x - hub[0], y - hub[1])
@@ -611,12 +616,12 @@ def _split_path_at(path, idx, hub):
     right = [hub] + path[idx + 1:]
     if len(left) < 2 or len(right) < 2:
         return None
-    if _plen(left) < 8.0 or _plen(right) < 8.0:
+    if plen(left) < 8.0 or plen(right) < 8.0:
         return None
     return left, right
 
 
-def split_at_crossings(paths, hubs, cut_radius=22.0, min_len=8.0):
+def split_at_crossings(paths, hubs, cut_radius=_PATH_CROSSING_RADIUS, min_len=8.0):
     """Split paths at crossing hubs so each arm stops at the junction."""
     if not hubs:
         return paths
@@ -642,13 +647,13 @@ def split_at_crossings(paths, hubs, cut_radius=22.0, min_len=8.0):
                     next_paths.extend(parts)
                     changed = True
                     continue
-            if len(path) >= 2 and _plen(path) >= min_len:
+            if len(path) >= 2 and plen(path) >= min_len:
                 next_paths.append(path)
         result = next_paths
     return result
 
 
-def add_junction_connectors(paths, hubs, max_gap=42.0, min_gap=1.5):
+def add_junction_connectors(paths, hubs, max_gap=_CONNECTOR_MAX_GAP, min_gap=_CONNECTOR_MIN_GAP):
     """Short connector paths from segment ends to shared junction hubs."""
     if not hubs:
         return paths
@@ -676,7 +681,7 @@ def add_junction_connectors(paths, hubs, max_gap=42.0, min_gap=1.5):
     return paths + connectors
 
 
-def bridge_endpoint_gaps(paths, mask, w, h, hubs=(), min_gap=3.0, max_gap=22.0):
+def bridge_endpoint_gaps(paths, mask, w, h, hubs=(), min_gap=_BRIDGE_MIN_GAP, max_gap=_BRIDGE_MAX_GAP):
     """Connect nearby free endpoints (loop openings, stem gaps)."""
     endpoints = []
     for pi, path in enumerate(paths):
@@ -727,41 +732,6 @@ def bridge_endpoint_gaps(paths, mask, w, h, hubs=(), min_gap=3.0, max_gap=22.0):
     return paths + connectors
 
 
-def split_at_sharp_corners(paths, angle_deg=70.0, min_seg_len=20.0):
-    """Split polylines at sharp bends (arrow heads, ampersand crossings)."""
-    threshold = math.cos(math.radians(angle_deg))
-    result = []
-    for path in paths:
-        if len(path) < 4:
-            result.append(path)
-            continue
-        corners = []
-        for i in range(1, len(path) - 1):
-            v1x = path[i][0] - path[i - 1][0]
-            v1y = path[i][1] - path[i - 1][1]
-            v2x = path[i + 1][0] - path[i][0]
-            v2y = path[i + 1][1] - path[i][1]
-            m1 = math.hypot(v1x, v1y)
-            m2 = math.hypot(v2x, v2y)
-            if m1 < 1e-6 or m2 < 1e-6:
-                continue
-            if (v1x * v2x + v1y * v2y) / (m1 * m2) < threshold:
-                corners.append(i)
-        if not corners:
-            result.append(path)
-            continue
-        start = 0
-        for idx in corners:
-            seg = path[start:idx + 1]
-            if len(seg) >= 2 and _plen(seg) >= min_seg_len:
-                result.append(seg)
-            start = idx
-        tail = path[start:]
-        if len(tail) >= 2 and _plen(tail) >= min_seg_len:
-            result.append(tail)
-    return result
-
-
 def finalize_topology(paths, mask, dt, w, h, stroke_width=45):
     """Split arms at crossings and add junction connectors like the reference."""
     hubs = _path_crossing_hubs(paths)
@@ -772,3 +742,103 @@ def finalize_topology(paths, mask, dt, w, h, stroke_width=45):
     print(f"  Topology: {len(hubs)} hubs, {len(connected)} paths "
           f"({len(connected) - len(split)} connectors)")
     return connected
+
+def merge_collinear_paths(paths, cos_threshold=0.90, max_gap=_MERGE_MAX_GAP):
+    """Merge collinear pieces split by junction processing.
+
+    After split_at_crossings cuts stems at junction hubs, the two halves
+    of each stem are collinear and their endpoints meet near (or at) the
+    hub. add_junction_connectors may add short stubs. This phase merges
+    collinear pieces whose endpoint tangent directions are nearly parallel
+    (|dot| > cos_threshold), skipping perpendicular arms (e.g. vertical
+    stem into horizontal crossbar at 90 deg) and short connector stubs
+    that are not collinear with the main stem direction.
+    """
+    if len(paths) < 2:
+        return paths
+
+    result_paths = [list(p) for p in paths]
+    active = [True] * len(paths)
+
+    changed = True
+    while changed:
+        changed = False
+        best_val = -1.0
+        best = None  # (i, j, reverse_j, i_first)
+
+        for i in range(len(paths)):
+            if not active[i] or len(result_paths[i]) < 2:
+                continue
+            pi = result_paths[i]
+            for j in range(len(paths)):
+                if i == j or not active[j] or len(result_paths[j]) < 2:
+                    continue
+                pj = result_paths[j]
+
+                for si in (0, 1):
+                    if si == 0:
+                        xi, yi = pi[0]
+                    else:
+                        xi, yi = pi[-1]
+                    di = _end_dir(pi, si)
+
+                    for sj in (0, 1):
+                        if sj == 0:
+                            xj, yj = pj[0]
+                        else:
+                            xj, yj = pj[-1]
+                        gap = math.hypot(xj - xi, yj - yi)
+                        if gap > max_gap:
+                            continue
+
+                        dj = _end_dir(pj, sj)
+                        dot = di[0] * dj[0] + di[1] * dj[1]
+                        abs_dot = abs(dot)
+                        if abs_dot <= cos_threshold:
+                            continue
+
+                        score = abs_dot - gap / max_gap
+                        if score > best_val:
+                            best_val = score
+                            dot_pos = dot > 0
+
+                            if not dot_pos:
+                                # anti-parallel outward: natural connection
+                                if si == 1 and sj == 0:
+                                    best = (i, j, False, True)
+                                elif si == 0 and sj == 1:
+                                    best = (i, j, False, False)
+                            else:
+                                # parallel outward: one path needs reversing
+                                if si == 1 and sj == 1:
+                                    best = (i, j, True, True)
+                                elif si == 0 and sj == 0:
+                                    best = (i, j, True, False)
+
+        if best is None:
+            break
+
+        i, j, reverse_j, i_first = best
+        pj = result_paths[j]
+        if reverse_j:
+            pj = list(reversed(pj))
+
+        if i_first:
+            dup = math.hypot(result_paths[i][-1][0] - pj[0][0],
+                             result_paths[i][-1][1] - pj[0][1]) < 1.0
+            merged = result_paths[i] + (pj[1:] if dup else pj)
+        else:
+            dup = math.hypot(pj[-1][0] - result_paths[i][0][0],
+                             pj[-1][1] - result_paths[i][0][1]) < 1.0
+            merged = pj + (result_paths[i][1:] if dup else result_paths[i])
+
+        result_paths[i] = merged
+        active[j] = False
+        changed = True
+
+    merged = [result_paths[i] for i in range(len(paths))
+              if active[i] and len(result_paths[i]) >= 2]
+    removed = len(paths) - len(merged)
+    if removed:
+        print(f"  Merge collinear: {removed} -> {len(merged)} paths")
+    return merged

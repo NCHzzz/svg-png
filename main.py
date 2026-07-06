@@ -7,10 +7,11 @@ import os
 import sys
 import argparse
 from png_decode import decode_png
-from thinning import binarize, extract_centerline_paths
+from centerline_extract import binarize, extract_centerline_paths
 from skeleton_graph import (split_on_clearance_jumps, dedupe_paths,
                             prune_covered_fragments, resolve_junctions,
-                            finalize_topology, _plen, _dt_at)
+                            finalize_topology, merge_collinear_paths,
+                            plen, dt_at)
 from path_fit import (rdp_simplify, fit_line_if_straight, resample_polyline,
                       smooth_polyline, snap_axis_aligned, remove_spikes)
 from svg_writer import write_svg
@@ -24,7 +25,7 @@ SMOOTH_WINDOW = 3
 
 def estimate_stroke_width(paths, dt, w, h):
     """Median clearance along centerlines x2 = stroke width of the input shape."""
-    clear = sorted(_dt_at(dt, x, y, w, h) for p in paths for (x, y) in p)
+    clear = sorted(dt_at(dt, x, y, w, h) for p in paths for (x, y) in p)
     if not clear:
         return 45
     # Ridge clearance (upper quartile) tracks full stroke width better than
@@ -57,21 +58,23 @@ def process_one(png_path, svg_path, **kwargs):
     paths = resolve_junctions(paths, mask, dt, w, h,
                               cap_clearance=stroke_width / 2.0)
     paths = finalize_topology(paths, mask, dt, w, h, stroke_width)
+    paths = merge_collinear_paths(paths)
+    paths = prune_covered_fragments(paths, dt, w, h, max_len=stroke_width * 0.75)
 
     simplified = []
     for p in paths:
-        if len(p) < 2 or _plen(p) < 8.0:
+        if len(p) < 2 or plen(p) < 8.0:
             continue
         sp = remove_spikes(p)
         sp = rdp_simplify(sp, rdp_epsilon)
         sp = fit_line_if_straight(sp, straight_max_error)
         sp = snap_axis_aligned(sp)
-        if len(sp) < 2 or _plen(sp) < 6.0:
+        if len(sp) < 2 or plen(sp) < 6.0:
             continue
         sp = resample_polyline(sp, spacing)
         sp = smooth_polyline(sp, smooth_window)
         sp = snap_axis_aligned(sp)
-        if len(sp) >= 2 and _plen(sp) >= 6.0:
+        if len(sp) >= 2 and plen(sp) >= 6.0:
             simplified.append(sp)
 
     print(f"  Paths: {len(simplified)}")

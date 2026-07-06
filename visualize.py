@@ -12,7 +12,7 @@ import math
 import zlib
 import struct
 from png_decode import decode_png
-from thinning import binarize
+from centerline_extract import binarize
 from test_compare import (parse_svg_paths, path_to_subpaths,
                           _mask_grid, _svg_full_stroke_grid)
 
