@@ -187,9 +187,9 @@ async function buildPage() {
   const grid = document.getElementById('grid');
 
   for (const name of FILES) {
-    const refPath = `challenge_sample_results/${name}.svg`;
-    const myPath = `out/${name}.svg`;
-    const pngPath = `challenge_sample/${name}.png`;
+    const refPath = `../data/reference/${name}.svg`;
+    const myPath = `../out/${name}.svg`;
+    const pngPath = `../data/input/${name}.png`;
 
     const [refStats, myStats] = await Promise.all([
       loadSvgStats(refPath),
