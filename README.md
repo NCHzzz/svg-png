@@ -21,7 +21,7 @@ This is the inverse of "outline tracing": instead of bounding the shape, we coll
 
 ## 2. The challenge
 
-A reference set of SVGs was provided alongside the PNGs (`challenge_sample_results/`). The task is to reproduce the *structure* — centerline paths that, when stroked, re-draw the glyph — and beat the reference on **shape reconstruction fidelity**.
+A reference set of SVGs was provided alongside the PNGs (now in `data/reference/`). The task is to reproduce the *structure* — centerline paths that, when stroked, re-draw the glyph — and beat the reference on **shape reconstruction fidelity**.
 
 Two metrics are reported (see `test_compare.py`):
 
@@ -43,20 +43,20 @@ PNG → Decode → Binarize → Chamfer Distance Transform → Contour Trace
 
 | Stage | File | What happens |
 |-------|------|--------------|
-| Decode | `png_decode.py` | Pure-Python PNG decoder → raw pixels |
-| Binarize + DT | `centerline_extract.py` | Threshold to mask, two-pass chamfer distance transform (clearance field) |
-| Contour trace | `centerline_extract.py` | Moore-style boundary following of the black region |
-| Chord midpoint | `centerline_extract.py` | At each contour sample, estimate local tangent → cast a perpendicular ray across the stroke → take the midpoint as a centerline candidate |
-| Centeredness filter | `centerline_extract.py` | Keep a midpoint only if its chamfer clearance ≈ half the chord length. This is the key correctness gate: it rejects diagonal rays that cut corners or cross junctions, so chains break cleanly instead of drifting into hooks. |
-| Chain | `centerline_extract.py` | Link surviving midpoints by contour order into initial polylines |
-| Clearance-jump split | `skeleton_graph.py` | Break a chain wherever clearance jumps (entering a junction blob) |
-| Dedupe | `skeleton_graph.py` | Each stroke is sampled from both contour sides → two parallel tracks; keep the longest unique one |
-| Junction resolution | `skeleton_graph.py` | Reconnect topology at T-junctions, corners, and stroke caps |
-| Topology finalize | `skeleton_graph.py` | Split paths at crossing hubs, add short junction connectors (mirrors reference SVG structure) |
-| Simplify + snap | `path_fit.py` | RDP simplify, straight-line detection, axis-aligned snap, spike removal, resample, smooth |
-| Write | `svg_writer.py` | Emit `<path d="M … L …">` elements with the auto stroke width |
+| Decode | `src/png_decode.py` | Pure-Python PNG decoder → raw pixels |
+| Binarize + DT | `src/centerline_extract.py` | Threshold to mask, two-pass chamfer distance transform (clearance field) |
+| Contour trace | `src/centerline_extract.py` | Moore-style boundary following of the black region |
+| Chord midpoint | `src/centerline_extract.py` | At each contour sample, estimate local tangent → cast a perpendicular ray across the stroke → take the midpoint as a centerline candidate |
+| Centeredness filter | `src/centerline_extract.py` | Keep a midpoint only if its chamfer clearance ≈ half the chord length. This is the key correctness gate: it rejects diagonal rays that cut corners or cross junctions, so chains break cleanly instead of drifting into hooks. |
+| Chain | `src/centerline_extract.py` | Link surviving midpoints by contour order into initial polylines |
+| Clearance-jump split | `src/skeleton_graph.py` | Break a chain wherever clearance jumps (entering a junction blob) |
+| Dedupe | `src/skeleton_graph.py` | Each stroke is sampled from both contour sides → two parallel tracks; keep the longest unique one |
+| Junction resolution | `src/skeleton_graph.py` | Reconnect topology at T-junctions, corners, and stroke caps |
+| Topology finalize | `src/skeleton_graph.py` | Split paths at crossing hubs, add short junction connectors (mirrors reference SVG structure) |
+| Simplify + snap | `src/path_fit.py` | RDP simplify, straight-line detection, axis-aligned snap, spike removal, resample, smooth |
+| Write | `src/svg_writer.py` | Emit `<path d="M … L …">` elements with the auto stroke width |
 
-A **spatial hash** (`spatial_hash.py`) backs all the nearest-point / range queries used by dedupe, pruning, T-connection detection, and junction endpoint registration.
+A **spatial hash** (`src/spatial_hash.py`) backs all the nearest-point / range queries used by dedupe, pruning, T-connection detection, and junction endpoint registration.
 
 ---
 
@@ -67,24 +67,26 @@ A **spatial hash** (`spatial_hash.py`) backs all the nearest-point / range queri
 
 ### Run on the sample set
 
-```bash
-# Process every PNG in challenge_sample/ → write SVGs to out/
-python main.py challenge_sample out
+All commands are run from the repo root.
 
-# Score the output against the reference set
-python test_compare.py
+```bash
+# Process every PNG in data/input/ → write SVGs to out/
+python src/main.py data/input out
+
+# Score the output against the reference set (data/reference/)
+python src/test_compare.py
 
 # Render an overlay diagnostic (PNG + our paths in red + reference in green)
-python visualize.py overlay letter_H
+python src/visualize.py overlay letter_H
 ```
 
 ### Process your own PNGs
 
 ```bash
-python main.py path/to/your/pngs path/to/output
+python src/main.py path/to/your/pngs path/to/output
 ```
 
-Input PNGs must be solid black shapes on a light/transparent background (see `challenge_sample/*.png`).
+Input PNGs must be solid black shapes on a light/transparent background (see `data/input/*.png`).
 
 ### Optional flags
 
@@ -102,7 +104,7 @@ Input PNGs must be solid black shapes on a light/transparent background (see `ch
 
 ## 5. Results
 
-Run `python test_compare.py` after `python main.py challenge_sample out`.
+Run `python src/test_compare.py` after `python src/main.py data/input out`.
 
 | Shape | Paths (out/ref) | Ref IoU | RecOut | RecRef |
 |-------|:-:|:-:|-:|-:|
@@ -134,21 +136,29 @@ Run `python test_compare.py` after `python main.py challenge_sample out`.
 
 ## 7. File map
 
-| File | Role |
-|------|------|
-| `main.py` | CLI entry point — orchestrates the full pipeline |
-| `png_decode.py` | Pure-Python PNG decoder → raw pixels |
-| `centerline_extract.py` | Binarize, chamfer distance transform, contour trace, perpendicular chord-midpoint centerline extraction (+ centeredness filter) |
-| `skeleton_graph.py` | Clearance-jump split, dedupe, junction/cap resolution, topology finalize, collinear merge, fragment pruning |
-| `spatial_hash.py` | Spatial hash grid for fast nearest-point / range queries |
-| `path_fit.py` | RDP simplify, straight-line fit, axis snap, spike removal, resample, smooth |
-| `svg_writer.py` | SVG output (`<path d="M … L …">` + stroke width) |
-| `test_compare.py` | Reference IoU + reconstruction IoU scoring suite |
-| `visualize.py` | Overlay PNG diagnostics (input + our paths + reference) |
-| `challenge_sample/` | Input PNG glyphs |
-| `challenge_sample_results/` | Reference SVGs |
-| `out/` | Generated SVG output |
-| `viz_overlay_*.png` | Pre-rendered overlay diagnostics |
+```
+svg-png/
+├── src/                    pipeline source (standard library only)
+│   ├── main.py             CLI entry point — orchestrates the full pipeline
+│   ├── png_decode.py       Pure-Python PNG decoder → raw pixels
+│   ├── centerline_extract.py  Binarize, chamfer distance transform, contour trace, perpendicular chord-midpoint centerline extraction (+ centeredness filter)
+│   ├── skeleton_graph.py   Clearance-jump split, dedupe, junction/cap resolution, topology finalize, collinear merge, fragment pruning
+│   ├── spatial_hash.py     Spatial hash grid for fast nearest-point / range queries
+│   ├── path_fit.py         RDP simplify, straight-line fit, axis snap, spike removal, resample, smooth
+│   ├── svg_writer.py       SVG output (`<path d="M … L …">` + stroke width)
+│   ├── test_compare.py     Reference IoU + reconstruction IoU scoring suite
+│   └── visualize.py        Overlay PNG diagnostics (input + our paths + reference)
+├── data/
+│   ├── input/              Input PNG glyphs (the challenge sample)
+│   └── reference/          Provided reference SVGs
+├── out/                    Generated SVG output (one per input glyph)
+├── diagnostics/            Pre-rendered overlay diagnostics (`viz_overlay_*.png`)
+├── docs/
+│   ├── Centerline extraction.txt   The challenge brief
+│   └── compare.html        Side-by-side SVG comparison page
+├── README.md
+└── .gitignore
+```
 
 ---
 
@@ -157,9 +167,9 @@ Run `python test_compare.py` after `python main.py challenge_sample out`.
 From the repo root:
 
 ```bash
-python main.py challenge_sample out        # 1. generate SVGs
-python test_compare.py                      # 2. print the results table
-python visualize.py overlay letter_H        # 3. (optional) inspect one shape
+python src/main.py data/input out        # 1. generate SVGs
+python src/test_compare.py                # 2. print the results table
+python src/visualize.py overlay letter_H  # 3. (optional) inspect one shape
 ```
 
 Expected: the table in §5, with `out/*.svg` written and `RecOut` ≥ `RecRef` on every shape.

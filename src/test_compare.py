@@ -16,6 +16,13 @@ import sys
 import math
 import xml.etree.ElementTree as ET
 
+# Resolve paths relative to the repo root (one level above this src/ dir),
+# so the suite works no matter which directory it is launched from.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INPUT_DIR = os.path.join(_ROOT, "data", "input")
+REFERENCE_DIR = os.path.join(_ROOT, "data", "reference")
+OUTPUT_DIR = os.path.join(_ROOT, "out")
+
 
 def parse_svg_paths(svg_path):
     """Extract all path data strings from an SVG file."""
@@ -185,7 +192,7 @@ def _mask_grid(name, size=256):
     """Downsample the input PNG's binary mask to the metric grid."""
     from png_decode import decode_png
     from centerline_extract import binarize
-    w, h, px = decode_png(f"challenge_sample/{name}.png")
+    w, h, px = decode_png(os.path.join(INPUT_DIR, f"{name}.png"))
     mask = binarize(px, w, h)
     grid = bytearray(size * size)
     for y in range(size):
@@ -226,8 +233,8 @@ def reconstruction_iou(name, svg_path):
 
 def test_one_shape(name):
     """Compare one shape's output against reference."""
-    ref_path = f"challenge_sample_results/{name}.svg"
-    out_path = f"out/{name}.svg"
+    ref_path = os.path.join(REFERENCE_DIR, f"{name}.svg")
+    out_path = os.path.join(OUTPUT_DIR, f"{name}.svg")
 
     if not os.path.exists(ref_path):
         return {"error": f"Reference not found: {ref_path}"}

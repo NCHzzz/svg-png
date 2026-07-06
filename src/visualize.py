@@ -8,13 +8,19 @@ Visual diagnostics (pure Python, writes PNGs):
 """
 
 import sys
+import os
 import math
 import zlib
 import struct
 from png_decode import decode_png
 from centerline_extract import binarize
 from test_compare import (parse_svg_paths, path_to_subpaths,
-                          _mask_grid, _svg_full_stroke_grid)
+                          _mask_grid, _svg_full_stroke_grid, INPUT_DIR,
+                          REFERENCE_DIR, OUTPUT_DIR)
+
+# Diagnostics are written next to the other overlay PNGs.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DIAGNOSTICS_DIR = os.path.join(_ROOT, "diagnostics")
 
 SHAPES = ["letter_H", "letter_K", "arrow-turn-down-left",
           "arrow-pointer", "number_3", "number_6", "ampersand"]
@@ -36,7 +42,7 @@ def write_png_rgb(filepath, width, height, rows):
 def _render_region(name, x0, y0, x1, y1, out_file, size=512):
     sx = size / (x1 - x0)
     sy = size / (y1 - y0)
-    w, h, px = decode_png(f"challenge_sample/{name}.png")
+    w, h, px = decode_png(os.path.join(INPUT_DIR, f"{name}.png"))
     mask = binarize(px, w, h)
     rows = [bytearray([255] * (size * 3)) for _ in range(size)]
     for y in range(size):
@@ -63,23 +69,26 @@ def _render_region(name, x0, y0, x1, y1, out_file, size=512):
                                     off = (gx+dx) * 3
                                     rows[gy+dy][off:off+3] = bytes(color)
 
-    draw(f"challenge_sample_results/{name}.svg", (0, 160, 0))
-    draw(f"out/{name}.svg", (220, 0, 0))
+    draw(os.path.join(REFERENCE_DIR, f"{name}.svg"), (0, 160, 0))
+    draw(os.path.join(OUTPUT_DIR, f"{name}.svg"), (220, 0, 0))
     write_png_rgb(out_file, size, size, rows)
     print("wrote", out_file)
 
 
 def overlay(names):
     for name in names:
-        _render_region(name, 0, 0, 1024, 1024, f"viz_overlay_{name}.png")
+        _render_region(name, 0, 0, 1024, 1024,
+                       os.path.join(DIAGNOSTICS_DIR, f"viz_overlay_{name}.png"))
 
 
 def zoom(name, x0, y0, x1, y1):
-    _render_region(name, x0, y0, x1, y1, f"viz_zoom_{name}.png")
+    _render_region(name, x0, y0, x1, y1,
+                   os.path.join(DIAGNOSTICS_DIR, f"viz_zoom_{name}.png"))
 
 
 def cover(name, which="out"):
-    svg = f"out/{name}.svg" if which == "out" else f"challenge_sample_results/{name}.svg"
+    svg = (os.path.join(OUTPUT_DIR, f"{name}.svg") if which == "out"
+           else os.path.join(REFERENCE_DIR, f"{name}.svg"))
     size = 256
     m = _mask_grid(name, size)
     s = _svg_full_stroke_grid(svg, size)

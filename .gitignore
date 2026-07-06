@@ -8,11 +8,11 @@ __pycache__/
 .vscode/
 .idea/
 
-# Build artifacts
+# Build / packaging artifacts
 *.zip
 deliverable_report.html
 build_report.py
 
-# Scratch output
+# Scratch / experimental output
 out_test/
 _deliverable/

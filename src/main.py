@@ -84,7 +84,7 @@ def process_one(png_path, svg_path, **kwargs):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('input_dir', nargs='?', default='challenge_sample')
+    p.add_argument('input_dir', nargs='?', default='data/input')
     p.add_argument('output_dir', nargs='?', default='out')
     p.add_argument('--stroke-width', type=int, default=None,
                    help='SVG stroke width (default: auto per shape)')
