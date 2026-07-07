@@ -242,6 +242,7 @@ def extract_centerline_paths(mask, width, height, sample_step=2):
             # peaks. The plain midpoint is biased on curved strokes (the
             # chord is perpendicular to one side only); slide to the max.
             # trượt dòng trên chord và chọn điểm có distance transform lớn nhất.
+            
             best_c = clearance
             bx, by = mx, my
             steps = int(chord)
@@ -256,38 +257,40 @@ def extract_centerline_paths(mask, width, height, sample_step=2):
                         best_c = c
                         bx, by = px_, py_
 
-            samples.append((idx, bx, by, best_c))
-
+            samples.append((idx, bx, by, best_c)) #idx     = index của điểm contour gốc
+                                                # bx, by  = điểm centerline tìm được
+                                                # best_c  = clearance tốt nhất tại điểm đó
         if len(samples) < 3:
             continue
 
         # Chain consecutive samples; break on contour-index or spatial gaps.
         chains = [[samples[0]]]
         for k in range(1, len(samples)):
-            pidx, px_, py_, _ = chains[-1][-1]
-            cidx, cx_, cy_, _ = samples[k]
+            pidx, px_, py_, _ = chains[-1][-1] # điểm trước node chain hiện tại
+            cidx, cx_, cy_, _ = samples[k] # node chain hiện tại
             if (cidx - pidx) > max_igap or math.hypot(cx_ - px_, cy_ - py_) > max_sgap:
-                chains.append([samples[k]])
+                chains.append([samples[k]]) # Tạo chain mới, chứa điểm hiện tại làm phần tử đầu tiên.
             else:
-                chains[-1].append(samples[k])
+                chains[-1].append(samples[k]) # Không vượt ngưỡng nào → điểm hiện tại thuộc cùng chain với điểm trước → thêm vào chain cuối cùng.
 
         # The contour is a closed loop: the last chain may continue into the
         # first one across the index wrap-around.
         def _wrap_connects(tail, head):
-            igap = head[0][0] + n - tail[-1][0]
-            sgap = math.hypot(head[0][1] - tail[-1][1], head[0][2] - tail[-1][2])
-            return igap <= max_igap and sgap <= max_sgap
-
+            igap = head[0][0] + n - tail[-1][0] # Khoảng cách theo index từ điểm cuối của tail đi vòng qua cuối contour rồi về điểm đầu của head.
+            sgap = math.hypot(head[0][1] - tail[-1][1], head[0][2] - tail[-1][2]) # sample dạng (idx, mx, my, best_c) => head[0][1] là mx, head[0][2] là my. Khoảng cách Euclidean giữa điểm cuối tail và điểm đầu head.
+            return igap <= max_igap and sgap <= max_sgap # Nếu chain cuối và chain đầu cách nhau ít trên vòng contour
+                                                            # và midpoint cuối/đầu cũng nằm gần nhau trong ảnh
+                                                            # => cho phép nối.
         closed = False
         if len(chains) > 1 and _wrap_connects(chains[-1], chains[0]):
-            chains[0] = chains.pop() + chains[0]
-        elif len(chains) == 1 and _wrap_connects(chains[0], chains[0]):
+            chains[0] = chains.pop() + chains[0] # bốc chain cuối, góc vào đầu. Ví dụ A->B->C thì sau đó là C + A -> B
+        elif len(chains) == 1 and _wrap_connects(chains[0], chains[0]): # Nếu chỉ có một chain, code kiểm tra xem cuối chain đó có nối lại được với đầu chain đó không.
             closed = True
 
         for ch in chains:
             if len(ch) < 3:
                 continue
-            pts = [(mx, my) for _, mx, my, _ in ch]
+            pts = [(mx, my) for _, mx, my, _ in ch] # chỉ lấy tọa độ midpoint, bỏ index và clearance
             if closed:
                 pts.append(pts[0])
             paths.append(pts)
