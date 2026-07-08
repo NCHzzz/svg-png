@@ -1,25 +1,60 @@
 """
-Post-processing of raw midpoint tracks:
+Post-processing of raw midpoint tracks into a connected skeleton graph.
 
-1. dedupe_paths     - every stroke is sampled from both of its sides, giving
-                      two nearly identical midpoint tracks; keep one.
-2. resolve_junctions - reconnect the topology that the centeredness filter
-                      intentionally broke:
-                      a) endpoint clusters: 2 endpoints -> corner join at the
-                         intersection of their tangents (elbows, sharp tips);
-                         3+ endpoints -> shared junction point (Y/T hubs);
-                      b) T-connections: walk a free endpoint forward until it
-                         lands on a path passing by (e.g. H crossbar -> stem);
-                      c) cap extension: push remaining free ends into the
-                         stroke tips until clearance drops to the drawn
-                         stroke's cap radius, so round caps fill the tip.
+Pipeline (5 steps):
+1. split_on_clearance_jumps — near a junction the perpendicular chord escapes
+   through the opening, causing a clearance spike; split chains at these
+   outliers so junction resolution can rebuild topology cleanly.
+2. dedupe_paths            — every stroke is sampled from both of its sides,
+   giving two nearly identical midpoint tracks; keep one, drop fold-backs.
+3. prune_covered_fragments — drop short leftover fragments (cap-wrap remnants,
+   junction-blob stubs) already covered by longer paths.
+4. resolve_junctions       — reconnect the topology that the centeredness
+   filter intentionally broke:
+   a) endpoint clusters: 2 endpoints -> corner join at the intersection of
+      their tangents (elbows, sharp tips); 3+ endpoints -> shared junction
+      point (Y/T hubs), with through-joins for collinear pairs;
+   b) T-connections: walk a free endpoint forward along the clearance ridge
+      until it lands on a path passing by (e.g. H crossbar -> stem);
+   c) cap extension: push remaining free ends into the stroke tips until
+      clearance drops to the drawn stroke's cap radius, so round caps fill
+      the tip.
+5. finalize_topology        — split arms at crossing hubs, add short junction
+   connectors, bridge nearby endpoint gaps, then merge collinear pieces that
+   were cut apart by the split.
+
+Hậu xử lý các đường trung tuyến thô thành đồ thị khung xương liên thông.
+
+Quy trình (5 bước):
+1. split_on_clearance_jumps — gần điểm nối, dây cung vuông góc thoát ra
+   qua khe hở, gây đột biến clearance; tách chuỗi tại các điểm ngoại lai
+   này để bước nối điểm tái tạo cấu trúc liên kết sạch sẽ.
+2. dedupe_paths — mỗi nét vẽ được lấy mẫu từ cả hai cạnh, tạo ra hai
+   đường trung tuyến gần như giống hệt; giữ một, bỏ đường gập ngược.
+3. prune_covered_fragments — bỏ đoạn thừa ngắn (tàn dư bọc đầu, đoạn cụt
+   vùng nối) đã bị đường dài hơn che phủ.
+4. resolve_junctions — tái kết nối cấu trúc liên kết mà bộ lọc định tâm
+   đã cố ý phá vỡ:
+   a) cụm điểm đầu: 2 điểm đầu -> nối góc tại giao điểm tiếp tuyến
+      (khuỷu, mũi nhọn); 3+ điểm đầu -> điểm nối chung (ngã rẽ Y/T),
+      với nối xuyên cho cặp thẳng hàng;
+   b) kết nối chữ T: đi dọc đường đỉnh clearance từ điểm đầu tự do
+      đến khi chạm đường đi ngang (vd: thanh ngang chữ H -> thân);
+   c) mở rộng đầu: đẩy điểm đầu tự do còn lại vào mũi nét vẽ đến khi
+      clearance giảm xuống bán kính đầu nét vẽ, để đầu tròn lấp đầy mũi.
+5. finalize_topology — tách nhánh tại điểm giao, thêm đoạn nối ngắn,
+   bắc cầu khoảng trống gần điểm đầu, rồi hợp nhất đoạn thẳng hàng
+   đã bị cắt rời bởi bước tách.
 """
+
+
 
 import math
 from collections import defaultdict
 from spatial_hash import PointGrid
 
 # ── Pixel-distance thresholds (tuned for ~256–1024 px icons) ────────────
+# ── Ngưỡng khoảng cách pixel (tinh chỉnh cho icon ~256–1024 px) ──────────
 
 # dedupe
 _DEDUPE_MIN_LEN = 12.0          # min arc length to keep a segment
@@ -57,12 +92,14 @@ _MERGE_MAX_GAP = 28.0           # max gap between collinear endpoints
 
 def plen(path):
     """Total arc length of a polyline."""
+    """tính tổng chiều dài của tất cả đoạn nhỏ nối các điểm của một đường polyline ( Polyline là một đường gồm nhiều điểm nối lại với nhau )."""
     return sum(math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
                for i in range(1, len(path)))
 
 
 def dt_at(dt, x, y, w, h):
     """Distance-transform value at (x,y) in pixel units (chamfer ÷ 3)."""
+    """Giá trị biến đổi khoảng cách tại (x,y) theo đơn vị pixel (chamfer ÷ 3)."""
     xi, yi = int(x), int(y)
     if 0 <= xi < w and 0 <= yi < h:
         return dt[yi][xi] / 3.0
@@ -71,12 +108,14 @@ def dt_at(dt, x, y, w, h):
 
 def _inside(mask, x, y, w, h):
     """True if (x,y) is inside the foreground region."""
+    """True nếu (x,y) nằm trong mask ( vùng đen )."""
     xi, yi = int(x), int(y)
     return 0 <= xi < w and 0 <= yi < h and mask[yi][xi] == 1
 
 
 def _segment_inside_mask(mask, w, h, ax, ay, bx, by):
     """True if every sampled point on segment a→b is inside foreground."""
+    """True nếu mọi điểm lấy mẫu trên đoạn a→b nằm trong mask."""
     steps = max(1, int(math.hypot(bx - ax, by - ay)))
     for s in range(steps + 1):
         t = s / steps
@@ -90,12 +129,16 @@ def split_on_clearance_jumps(paths, dt, w, h, up=1.30, down=0.72):
     opening: the midpoint drifts into the junction blob and its clearance
     jumps well above the stroke's typical half-width. Split chains at such
     outliers so junction resolution can rebuild the topology cleanly."""
+    """Khi đường trung tuyến đi gần junction, ví dụ chỗ giao của chữ H, K, T, chord có thể bị lệch vào vùng giao nhau lớn. 
+    Khi đó điểm midpoint không còn nằm trên stroke bình thường nữa, và giá trị distance transform/clearance bị nhảy vọt. 
+    Hàm này phát hiện các điểm bất thường đó và cắt path tại đó.  
+    """
     result = []
     for path in paths:
         clear = [dt_at(dt, x, y, w, h) for (x, y) in path]
         cur = []
         window = []
-        for i, pt in enumerate(path):
+        for i, pt in enumerate(path): # i là index, pt là (x,y) của điểm trong path
             if window:
                 med = sorted(window)[len(window) // 2]
                 if clear[i] > med * up or clear[i] < med * down:
@@ -119,24 +162,37 @@ def dedupe_paths(paths, dt, w, h, min_len=_DEDUPE_MIN_LEN):
     rounded cap. Keep longest tracks first; drop points that duplicate
     already-kept geometry, or the track's own geometry from a distant
     position along the same track (fold-back)."""
+    """Mỗi nét vẽ tạo ra hai đường trung tuyến (mỗi cạnh contour một đường),
+    và một đường có thể gập ngược lại chính nó tại nơi contour bọc đầu tròn.
+    Giữ đường dài nhất trước; bỏ điểm trùng với hình học đã giữ, hoặc trùng
+    với chính đường đó từ vị trí xa dọc theo cùng đường (gập ngược)."""
     order = sorted(range(len(paths)), key=lambda i: -plen(paths[i]))
     kept = PointGrid()
     result = []
 
+    # Duyệt từng path theo thứ tự từ dài nhất đến ngắn nhất
     for pi in order:
+        """
+        path = đường hiện tại đang xét
+        own = PointGrid lưu các điểm của chính path này
+        arc = chiều dài đã đi được dọc theo path
+        dup = danh sách đánh dấu điểm nào bị trùng
+        """ 
         path = paths[pi]
         own = PointGrid()
         arc = 0.0
         dup = []
         for k, (x, y) in enumerate(path):
             if k > 0:
-                arc += math.hypot(x - path[k - 1][0], y - path[k - 1][1])
+                arc += math.hypot(x - path[k - 1][0], y - path[k - 1][1]) # Tính chiều dài đoạn thẳng từ điểm trước đến điểm hiện tại dọc theo path
             clearance = dt_at(dt, x, y, w, h)
             r = min(_DEDUPE_MAX_RADIUS, max(_DEDUPE_MIN_RADIUS, 0.4 * clearance))
             is_dup = kept.near(x, y, r) is not None
             if not is_dup:
                 # Self fold-back: same location reached much earlier in arc
                 # (track wrapped a cap and doubled back along the far side).
+                # Điểm hiện tại có gần điểm cũ của chính path này không?
+                # Và điểm cũ đó có cách khá xa theo chiều dài path không?
                 guard = 2.0 * r + 6.0
                 cur_arc = arc
                 if own.any_match(x, y, r, lambda a: cur_arc - a > guard):
@@ -144,33 +200,36 @@ def dedupe_paths(paths, dt, w, h, min_len=_DEDUPE_MIN_LEN):
             dup.append(is_dup)
             own.add(x, y, arc)
 
-        # Split into runs of unique points.
-        runs = []
-        s = None
-        for i, f in enumerate(dup):
-            if not f and s is None:
-                s = i
-            elif f and s is not None:
-                runs.append((s, i))
-                s = None
-        if s is not None:
-            runs.append((s, len(path)))
+        # Split into unique_ranges of unique points.
+        # Tách thành các đoạn chạy gồm điểm duy nhất.
+        unique_ranges = []
+        start = None
+        for i, is_duplicate in enumerate(dup): # duyệt qua danh sách đánh dấu điểm trùng
+            if not is_duplicate and start is None:  # Nếu điểm hiện tại không trùng và chưa bắt đầu một đoạn duy nhất nào
+                start = i
+            elif is_duplicate and start is not None: # Nếu điểm hiện tại trùng và đã bắt đầu một đoạn duy nhất, kết thúc đoạn đó
+                unique_ranges.append((start, i))
+                start = None
+        if start is not None:
+            unique_ranges.append((start, len(path)))
 
-        for (a, b) in runs:
+        for (a, b) in unique_ranges:
             seg = path[a:b]
             if len(seg) >= 3 and plen(seg) >= min_len:
                 for (x, y) in seg:
                     kept.add(x, y)
-                result.append(seg)
+                result.append(seg) # Thêm đoạn duy nhất vào kết quả
 
     print(f"  After dedupe: {len(result)} paths")
-    return result
+    return result # trả về danh sách các đoạn path đã được loại bỏ các điểm trùng lặp.
 
 
 def prune_covered_fragments(paths, dt, w, h, max_len=_PRUNE_MAX_LEN):
     """Drop short leftover tracks (cap-wrap remnants, junction-blob branch
     stubs) that lie entirely within the stroke area already covered by
     longer paths."""
+    """Bỏ các đường thừa ngắn (tàn dư bọc đầu, đoạn cụt nhánh vùng nối)
+    nằm hoàn toàn trong vùng nét vẽ đã bị đường dài hơn che phủ."""
     if len(paths) < 2:
         return paths
     lengths = [plen(p) for p in paths]
@@ -179,66 +238,75 @@ def prune_covered_fragments(paths, dt, w, h, max_len=_PRUNE_MAX_LEN):
         g = PointGrid()
         for (x, y) in p:
             g.add(x, y)
-        grids.append(g)
+        grids.append(g) # Tạo PointGrid cho từng path
 
-    keep = [True] * len(paths)
-    for pi, path in enumerate(paths):
-        if lengths[pi] >= max_len:
+    keep = [True] * len(paths) # mặc định ban đầu giữ tất cả các path
+    for pi, path in enumerate(paths): # hàm duyệt từng path để kiểm tra xem có bị ngắn và bị che phủ bởi các path khác không
+        if lengths[pi] >= max_len: # nếu path hiện tại dài hơn max_len thì bỏ qua, không cần kiểm tra
             continue
         covered = True
         for (x, y) in path:
             r = max(1.1 * dt_at(dt, x, y, w, h), _PRUNE_COVERAGE_MIN_R)
             hit = False
             for pj in range(len(paths)):
-                if pj == pi or not keep[pj] or lengths[pj] <= lengths[pi]:
+                if pj == pi or not keep[pj] or lengths[pj] <= lengths[pi]: # Không so với chính nó, path đã bị loại bỏ, hoặc path ngắn hơn hoặc bằng path hiện tại
                     continue
-                if grids[pj].near(x, y, r) is not None:
+                if grids[pj].near(x, y, r) is not None: # Trong những path dài hơn, có path nào có điểm gần (x,y) trong bán kính r không?
                     hit = True
                     break
-            if not hit:
+            if not hit: # chỉ cần 1 điểm không bị che phủ bởi các path dài hơn là đủ để giữ path hiện tại
                 covered = False
                 break
         if covered:
             keep[pi] = False
 
-    pruned = sum(1 for k in keep if not k)
+    pruned = sum(1 for k in keep if not k) # đếm số lượng path bị loại bỏ
     if pruned:
         print(f"  Pruned {pruned} covered fragments")
-    return [p for i, p in enumerate(paths) if keep[i]]
+    return [p for i, p in enumerate(paths) if keep[i]] # trả về danh sách các path còn lại sau khi loại bỏ các path bị che phủ.
 
 
 def _is_closed(path):
     """True if path's first and last points are nearly coincident (≈loop)."""
+    """True nếu điểm đầu và điểm cuối của đường gần trùng nhau (≈vòng kín)."""
     return len(path) >= 4 and math.hypot(path[0][0] - path[-1][0],
-                                         path[0][1] - path[-1][1]) < _CLOSED_COINCIDE
+                                         path[0][1] - path[-1][1]) < _CLOSED_COINCIDE # nếu đường có ít nhất 4 điểm và khoảng cách giữa điểm đầu và điểm cuối nhỏ hơn _CLOSED_COINCIDE thì coi như đường là vòng kín.
 
 
 def _end_dir(path, side, span=_END_DIR_SPAN):
     """Unit direction pointing OUT of the path at the given end, measured
     over `span` pixels of arc length (robust to sub-pixel point noise)."""
+    """Hướng đơn vị chỉ RA NGOÀI đường tại đầu đã cho, đo trên `span` pixel
+    chiều dài cung (chống nhiễu điểm dưới pixel).
+    path = danh sách điểm centerline
+    side = 0 nghĩa là lấy hướng ở đầu path
+    side = 1 nghĩa là lấy hướng ở cuối path
+    span = nhìn sâu vào path khoảng bao nhiêu pixel để tính hướng
+    """
     if side == 0:
         bx, by = path[0]
-        idx = range(1, len(path))
+        idx = range(1, len(path)) # đi từ đầu đến cuối
     else:
         bx, by = path[-1]
-        idx = range(len(path) - 2, -1, -1)
-    ax, ay = bx, by
+        idx = range(len(path) - 2, -1, -1) # đi từ cuối đến đầu
+    inside_x, inside_y = bx, by # điểm mới nhất đã đi tới trong path - dùng cho việc tính direction sau vòng lặp
     arc = 0.0
-    px, py = bx, by
+    prev_x, prev_y = bx, by  # điểm mới để vòng sau tính khoảng cách - dùng cho việc cộng arc trong vòng lặp
     for k in idx:
         x, y = path[k]
-        arc += math.hypot(x - px, y - py)
-        px, py = x, y
-        ax, ay = x, y
+        arc += math.hypot(x - prev_x, y - prev_y)
+        prev_x, prev_y = x, y
+        inside_x, inside_y = inside_x, inside_y
         if arc >= span:
             break
-    dx, dy = bx - ax, by - ay
+    dx, dy = bx - inside_x, by - inside_y
     m = math.hypot(dx, dy)
-    return (dx / m, dy / m) if m > 1e-9 else (0.0, 0.0)
+    return (dx / m, dy / m) if m > 1e-9 else (0.0, 0.0) # trả về vector direction đơn vị từ inside point ra ngoài điểm đầu hoặc cuối của path chuẩn hóa (0,1)
 
 
 def _append_end(path, side, pt):
     """Append pt to start (side=0) or end (side=1) of path in-place."""
+    """Thêm pt vào đầu (side=0) hoặc cuối (side=1) của đường tại chỗ."""
     if side == 0:
         path.insert(0, pt)
     else:
@@ -247,20 +315,31 @@ def _append_end(path, side, pt):
 
 def _ray_intersection(p1, d1, p2, d2):
     """Intersection of ray p1+t*d1 and ray p2+t*d2. Returns (t1, t2, x, y) or None."""
-    det = d1[0] * (-d2[1]) - (-d2[0]) * d1[1]
-    if abs(det) < 1e-6:
+    """Giao điểm của tia p1+t*d1 và tia p2+t*d2. Trả về (t1, t2, x, y) hoặc None."""
+    """
+    p1 = điểm bắt đầu của tia 1
+    d1 = hướng của tia 1
+    p2 = điểm bắt đầu của tia 2
+    d2 = hướng của tia 2
+    tìm t1, t2 sao cho p1 + t1*d1 = p2 + t2*d2 ( công thức toán học giao điểm của hai tia )
+    """
+    
+    det = d1[0] * (-d2[1]) - (-d2[0]) * d1[1] # 3 dòng này kiểm tra xem có song song không, nếu song song thì không có giao điểm
+    if abs(det) < 1e-6: 
         return None
     rx, ry = p2[0] - p1[0], p2[1] - p1[1]
     t1 = (rx * (-d2[1]) - (-d2[0]) * ry) / det
     t2 = (d1[0] * ry - rx * d1[1]) / det
-    return (t1, t2, p1[0] + t1 * d1[0], p1[1] + t1 * d1[1])
+    return (t1, t2, p1[0] + t1 * d1[0], p1[1] + t1 * d1[1]) # trả về t1, t2 và tọa độ giao điểm (x,y) nếu có giao điểm, ngược lại trả về None nếu hai tia song song.
 
 
 def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAULT):
     """Reconnect topology at junctions, corners and caps. Mutates copies."""
+    """Tái kết nối cấu trúc liên kết tại điểm nối, góc và đầu nét. Biến đổi bản sao."""
     paths = [list(p) for p in paths]
 
     # ---- collect free endpoints -------------------------------------------
+    # ---- thu thập điểm đầu tự do ------------------------------------------
     endpoints = []  # (path_idx, side, x, y)
     for pi, p in enumerate(paths):
         if len(p) < 2 or _is_closed(p):
@@ -271,6 +350,7 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
     resolved = set()  # endpoint list indices already handled
 
     # ---- pass A: endpoint clusters (corners and junction hubs) ------------
+    # ---- lượt A: cụm điểm đầu (góc và trung tâm điểm nối) -----------------
     m = len(endpoints)
     parent = list(range(m))
 
@@ -300,6 +380,8 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
     def _facing_score(i, j):
         """How well two endpoints continue into each other: both must point
         toward the other, and their directions must be anti-parallel."""
+        """Mức độ hai điểm đầu tiếp nối vào nhau: cả hai phải hướng về nhau,
+        và hướng của chúng phải ngược chiều (anti-parallel)."""
         pi, si, xi, yi = endpoints[i]
         pj, sj, xj, yj = endpoints[j]
         d1 = _end_dir(paths[pi], si)
@@ -318,6 +400,8 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
     def _corner_join(i, j):
         """Join two endpoints at the intersection of their tangents (falls
         back to their midpoint), e.g. elbows, sharp tips, loop closures."""
+        """Nối hai điểm đầu tại giao điểm tiếp tuyến của chúng (dùng điểm
+        giữa nếu không tìm được), vd: khuỷu, mũi nhọn, đóng vòng."""
         pi, si, xi, yi = endpoints[i]
         pj, sj, xj, yj = endpoints[j]
         d1 = _end_dir(paths[pi], si)
@@ -346,6 +430,21 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
         centerlines actually meet, e.g. deep inside an arrowhead vertex);
         falls back to the endpoint centroid. Endpoints that do not point
         toward the hub are left for pass B."""
+        """Nối các điểm đầu vào một điểm nối chung. Trung tâm được đặt tại
+        nơi các tia tiếp tuyến giao nhau (đó là nơi các đường tâm nhánh
+        thực sự gặp nhau, vd: sâu trong đỉnh mũi tên); dùng trọng tâm điểm
+        đầu nếu không tìm được. Điểm đầu không hướng về trung tâm được để
+        lại cho lượt B."""
+        
+        """
+        Hàm resolve_junctions() là hàm nối lại các centerline path đang bị đứt ở junction, góc, chữ T, đầu nét/cap. 
+        Đây là bước sau khi đã có nhiều path thô nhưng chúng chưa nối topology đúng.
+        Input:
+        paths = nhiều đường centerline đã được lọc bớt trùng
+        Output:
+        paths = các đường centerline đã được nối lại ở góc, junction, T-shape, cap
+        """
+        
         pts = []
         for a in range(len(members)):
             for b in range(a + 1, len(members)):
@@ -427,7 +526,9 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
                 hub_joins += 1
 
     # ---- pass B: T-connections and cap extension --------------------------
+    # ---- lượt B: kết nối chữ T và mở rộng đầu nét -------------------------
     # Registry of all current path points for T-hit tests.
+    # Sổ đăng ký tất cả điểm đường hiện tại cho kiểm tra va chạm chữ T.
     registry = PointGrid()
     for pi, p in enumerate(paths):
         for (x, y) in p:
@@ -445,25 +546,33 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
         if d_end < 0.85 * cap_clearance:
             # Tapering terminal (stroke narrows toward the tip): follow it
             # deeper so the drawn cap reaches the tip of the shape.
+            # Đầu thuôn nhọn (nét vẽ hẹp dần về mũi): đi sâu hơn để
+            # đầu nét vẽ chạm tới mũi của hình.
             stop_dt = max(0.55 * d_end, 6.0)
         else:
             # Flat/round cap of a full-width stroke: stop half a drawn
             # stroke-width from the boundary so the round cap lands flush.
+            # Đầu phẳng/tròn của nét vẽ đầy đủ: dừng cách biên nửa
+            # chiều rộng nét vẽ để đầu tròn nằm khít.
             stop_dt = min(cap_clearance, 0.9 * d_end)
         max_walk = min(100.0, 4.0 * max(d_end, 10.0))
 
         # Already touching another path?
+        # Đã chạm đường khác chưa?
         if registry.near(x, y, _T_TOUCH_RADIUS, exclude_tag=pi) is not None:
             continue
 
         cx, cy = x, y
-        cap_trail = []  # ridge positions with clearance >= stop_dt
+        cap_trail = []  # ridge positions with clearance >= stop_dt  (vị trí đỉnh clearance >= stop_dt)
         walked = 0.0
         connected = False
         while walked < max_walk:
             # Steer along the clearance ridge: of straight-ahead and two
             # slightly turned steps, take the one with max clearance. This
             # lets the walk follow curved tapering terminals.
+            # Lái dọc theo đường đỉnh clearance: trong số bước thẳng và hai
+            # bước hơi rẽ, chọn bước có clearance cao nhất. Việc này cho phép
+            # đường đi bám theo đầu thuôn cong.
             nx, ny = -dy, dx
             best = None
             for off in (0.0, 0.7, -0.7):
@@ -504,12 +613,14 @@ def resolve_junctions(paths, mask, dt, w, h, cap_clearance=_CAP_CLEARANCE_DEFAUL
 
 def _segments(poly):
     """Iterate over consecutive point pairs (edges) of a polyline."""
+    """Duyệt qua các cặp điểm liên tiếp (cạnh) của polyline."""
     for i in range(1, len(poly)):
         yield poly[i - 1], poly[i]
 
 
 def _seg_intersect(a1, a2, b1, b2):
     """Intersection point of segments a1→a2 and b1→b2, or None if parallel/non-intersecting."""
+    """Giao điểm của đoạn a1→a2 và b1→b2, hoặc None nếu song song/không giao."""
     x1, y1 = a1
     x2, y2 = a2
     x3, y3 = b1
@@ -526,6 +637,7 @@ def _seg_intersect(a1, a2, b1, b2):
 
 def _merge_points(points, radius=_MERGE_POINT_RADIUS):
     """Cluster nearby points; return centroids."""
+    """Gom cụm các điểm gần nhau; trả về trọng tâm."""
     if not points:
         return []
     used = [False] * len(points)
@@ -548,6 +660,7 @@ def _merge_points(points, radius=_MERGE_POINT_RADIUS):
 
 def _path_crossing_hubs(paths, merge_radius=_PATH_CROSSING_RADIUS):
     """Junction points from segment crossings and endpoint clusters."""
+    """Điểm nối từ giao điểm đoạn và cụm điểm đầu."""
     hits = []
     for i in range(len(paths)):
         for j in range(i + 1, len(paths)):
@@ -559,6 +672,8 @@ def _path_crossing_hubs(paths, merge_radius=_PATH_CROSSING_RADIUS):
 
     # Endpoints from different paths that meet at a junction often cluster
     # without sharing an exact segment intersection (caps stop short).
+    # Điểm đầu từ các đường khác nhau gặp tại điểm nối thường tụ lại
+    # mà không chia sẻ giao điểm đoạn chính xác (đầu nét dừng sớm).
     endpoints = []
     for pi, path in enumerate(paths):
         if len(path) < 2:
@@ -581,6 +696,7 @@ def _path_crossing_hubs(paths, merge_radius=_PATH_CROSSING_RADIUS):
                          sum(p[1] for p in group) / len(group)))
 
     # Interior T-hits: a path endpoint lands near another path's interior.
+    # Va chạm chữ T nội bộ: điểm đầu đường nằm gần phần thân của đường khác.
     for pi, path in enumerate(paths):
         if len(path) < 2:
             continue
@@ -600,6 +716,7 @@ def _path_crossing_hubs(paths, merge_radius=_PATH_CROSSING_RADIUS):
 
 def _nearest_index(path, hub, radius=_PATH_CROSSING_RADIUS):
     """Index of the path point closest to hub within radius, or None."""
+    """Chỉ số của điểm trên đường gần trung tâm nhất trong bán kính, hoặc None."""
     best = None
     for i, (x, y) in enumerate(path):
         d = math.hypot(x - hub[0], y - hub[1])
@@ -610,6 +727,7 @@ def _nearest_index(path, hub, radius=_PATH_CROSSING_RADIUS):
 
 def _split_path_at(path, idx, hub):
     """Split path at idx, projecting the cut to the hub."""
+    """Tách đường tại idx, chiếu vết cắt đến trung tâm."""
     if idx <= 0 or idx >= len(path) - 1:
         return None
     left = path[:idx + 1] + [hub]
@@ -623,6 +741,7 @@ def _split_path_at(path, idx, hub):
 
 def split_at_crossings(paths, hubs, cut_radius=_PATH_CROSSING_RADIUS, min_len=8.0):
     """Split paths at crossing hubs so each arm stops at the junction."""
+    """Tách đường tại trung tâm giao cắt để mỗi nhánh dừng đúng tại điểm nối."""
     if not hubs:
         return paths
     result = list(paths)
@@ -655,6 +774,7 @@ def split_at_crossings(paths, hubs, cut_radius=_PATH_CROSSING_RADIUS, min_len=8.
 
 def add_junction_connectors(paths, hubs, max_gap=_CONNECTOR_MAX_GAP, min_gap=_CONNECTOR_MIN_GAP):
     """Short connector paths from segment ends to shared junction hubs."""
+    """Đường nối ngắn từ đầu đoạn đến trung tâm điểm nối chung."""
     if not hubs:
         return paths
     connectors = []
@@ -683,6 +803,7 @@ def add_junction_connectors(paths, hubs, max_gap=_CONNECTOR_MAX_GAP, min_gap=_CO
 
 def bridge_endpoint_gaps(paths, mask, w, h, hubs=(), min_gap=_BRIDGE_MIN_GAP, max_gap=_BRIDGE_MAX_GAP):
     """Connect nearby free endpoints (loop openings, stem gaps)."""
+    """Nối điểm đầu tự do gần nhau (khe hở vòng, khoảng trống thân)."""
     endpoints = []
     for pi, path in enumerate(paths):
         if len(path) < 2:
@@ -734,6 +855,7 @@ def bridge_endpoint_gaps(paths, mask, w, h, hubs=(), min_gap=_BRIDGE_MIN_GAP, ma
 
 def finalize_topology(paths, mask, dt, w, h, stroke_width=45):
     """Split arms at crossings and add junction connectors like the reference."""
+    """Tách nhánh tại điểm giao và thêm đoạn nối điểm nối như bản tham chiếu."""
     hubs = _path_crossing_hubs(paths)
     split = split_at_crossings(paths, hubs) if hubs else paths
     connected = add_junction_connectors(split, hubs, max_gap=stroke_width * 0.85)
@@ -753,6 +875,16 @@ def merge_collinear_paths(paths, cos_threshold=0.90, max_gap=_MERGE_MAX_GAP):
     (|dot| > cos_threshold), skipping perpendicular arms (e.g. vertical
     stem into horizontal crossbar at 90 deg) and short connector stubs
     that are not collinear with the main stem direction.
+    """
+    """Hợp nhất các đoạn thẳng hàng bị tách bởi xử lý điểm nối.
+
+    Sau khi split_at_crossings cắt thân tại trung tâm điểm nối, hai nửa
+    của mỗi thân thẳng hàng và điểm đầu của chúng gặp nhau gần (hoặc tại)
+    trung tâm. add_junction_connectors có thể thêm đoạn cụt ngắn. Pha này
+    hợp nhất các đoạn thẳng hàng có hướng tiếp tuyến điểm đầu gần song song
+    (|dot| > cos_threshold), bỏ qua nhánh vuông góc (vd: thân dọc vào
+    thanh ngang ở 90 độ) và đoạn cụt nối ngắn không thẳng hàng với hướng
+    thân chính.
     """
     if len(paths) < 2:
         return paths

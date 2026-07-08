@@ -242,7 +242,6 @@ def extract_centerline_paths(mask, width, height, sample_step=2):
             # peaks. The plain midpoint is biased on curved strokes (the
             # chord is perpendicular to one side only); slide to the max.
             # trượt dòng trên chord và chọn điểm có distance transform lớn nhất.
-            
             best_c = clearance
             bx, by = mx, my
             steps = int(chord)
@@ -256,7 +255,6 @@ def extract_centerline_paths(mask, width, height, sample_step=2):
                     if c > best_c:
                         best_c = c
                         bx, by = px_, py_
-
             samples.append((idx, bx, by, best_c)) #idx     = index của điểm contour gốc
                                                 # bx, by  = điểm centerline tìm được
                                                 # best_c  = clearance tốt nhất tại điểm đó
