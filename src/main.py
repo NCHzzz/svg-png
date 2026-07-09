@@ -22,7 +22,7 @@ SAMPLE_STEP = 2
 RESAMPLE_SPACING = 4.0
 SMOOTH_WINDOW = 3
 
-
+# ước lượng độ dày nét vẽ gốc hoặc lấy 45 làm gốc
 def estimate_stroke_width(paths, dt, w, h):
     """Median clearance along centerlines x2 = stroke width of the input shape."""
     clear = sorted(dt_at(dt, x, y, w, h) for p in paths for (x, y) in p)
@@ -43,37 +43,54 @@ def process_one(png_path, svg_path, **kwargs):
     straight_max_error = kwargs.get("straight_max_error", STRAIGHT_MAX_ERROR)
 
     print(f"Processing: {png_path}")
-    w, h, pixels = decode_png(png_path)
-    mask = binarize(pixels, w, h)
+    w, h, pixels = decode_png(png_path) # decode ảnh trả về  width, height, pixel array (RGB/A)
+    mask = binarize(pixels, w, h) # tạo mask nhị phân từ pixel array (0/1)
 
+    # trích centerline paths từ mask nhị phân, Dùng distance transform dt để tìm đường giữa nét. 
+    # Mỗi path = list điểm (x,y). sample_step = bước lấy mẫu pixel.
     paths, dt = extract_centerline_paths(mask, w, h, sample_step)
+    
+    # Tách path tại điểm DT nhảy đột ngột — dấu hiệu path đi từ nét hẹp sang vùng junction rộng. 
+    # Chia thành nhiều đoạn độc lập
     paths = split_on_clearance_jumps(paths, dt, w, h)
+    
+    # Bỏ path trùng lặp (cùng region không gian). Giữ path clearance cao hơn (gần ridge hơn)
     paths = dedupe_paths(paths, dt, w, h)
+    
+    # Cắt đoạn ngắn bị path khác phủ kín — rác dư thừa
     paths = prune_covered_fragments(paths, dt, w, h)
 
     if stroke_width is None:
         stroke_width = estimate_stroke_width(paths, dt, w, h)
         print(f"  Estimated stroke width: {stroke_width}")
-
+        
+    # Tại điểm giao nét (junction), quyết định path nào nối vào nào. 
+    # cap_clearance = bán kính nét, dùng để nhận diện vùng đỉnh/endcap.
     paths = resolve_junctions(paths, mask, dt, w, h,
                               cap_clearance=stroke_width / 2.0)
+    
+    # Hoàn thiện cấu trúc đồ thị: nối/cắt path cho đúng topology nét cuối
     paths = finalize_topology(paths, mask, dt, w, h, stroke_width)
+    
+    # Ghép path thẳng hàng (gần như cùng hướng) thành 1 path dài.
     paths = merge_collinear_paths(paths)
+    
+    # Cắt rác ngắn hơn 0.75 * stroke_width — sau khi topology đã ổn định.
     paths = prune_covered_fragments(paths, dt, w, h, max_len=stroke_width * 0.75)
 
     simplified = []
     for p in paths:
-        if len(p) < 2 or plen(p) < 8.0:
+        if len(p) < 2 or plen(p) < 8.0: # skip path quá ngắn
             continue
-        sp = remove_spikes(p)
-        sp = rdp_simplify(sp, rdp_epsilon)
-        sp = fit_line_if_straight(sp, straight_max_error)
-        sp = snap_axis_aligned(sp)
+        sp = remove_spikes(p) # loại bỏ spike (điểm nhọn) trong path
+        sp = rdp_simplify(sp, rdp_epsilon) # Ramer-Douglas-Peucker, giảm điểm giữ độ chính xác
+        sp = fit_line_if_straight(sp, straight_max_error) # nếu path gần thẳng (sai số < 3.0px) → thay bằng 2 điểm đầu/cuối.
+        sp = snap_axis_aligned(sp) # snap điểm gần trục ngang/dọc về đúng trục (đường thẳng sạch).
         if len(sp) < 2 or plen(sp) < 6.0:
             continue
-        sp = resample_polyline(sp, spacing)
-        sp = smooth_polyline(sp, smooth_window)
-        sp = snap_axis_aligned(sp)
+        sp = resample_polyline(sp, spacing) # resample lại path theo khoảng cách spacing (mặc định 4px)
+        sp = smooth_polyline(sp, smooth_window) # trung bình trượt window 3 điểm → khử răng cưa
+        sp = snap_axis_aligned(sp) # lần 2 — snap lại sau smooth
         if len(sp) >= 2 and plen(sp) >= 6.0:
             simplified.append(sp)
 
